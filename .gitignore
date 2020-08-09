@@ -1,3 +1,13 @@
+# External libraries
+ext/
+
+# CMake build files
+out/
+build/
+
+# Visual Studio project files
+.vs/
+
 # Prerequisites
 *.d
 
