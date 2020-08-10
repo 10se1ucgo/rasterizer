@@ -16,26 +16,26 @@ namespace hamlet {
         }
 
         void resize(int width, int height) {
-            this->width = width;
-            this->height = height;
-            this->color_attachment = std::make_unique<color32[]>(this->num_pixels());
+            this->_width = width;
+            this->_height = height;
+            this->_color_attachment = std::make_unique<color32[]>(this->num_pixels());
         }
 
         color32 &pixel(int x, int y) {
-            return this->color_attachment[y * this->width + x];
+            return this->_color_attachment[y * this->_width + x];
         }
 
         size_t num_pixels() const {
-            return size_t(this->width) * this->height;
+            return size_t(this->_width) * this->_height;
         }
 
         void write_to_tga(const std::string &file_name) const;
 
-        int w() { return this->width; }
-        int h() { return this->height; }
-        const color32 *get() const { return this->color_attachment.get(); }
+        int width() { return this->_width; }
+        int height() { return this->_height; }
+        color32 *color_attachment() const { return this->_color_attachment.get(); }
     private:
-        int width, height;
-        std::unique_ptr<color32[]> color_attachment;
+        int _width, _height;
+        std::unique_ptr<color32[]> _color_attachment;
     };
 }
