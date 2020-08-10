@@ -3,6 +3,7 @@
 #include "fmt/format.h"
 #include "fmt/color.h"
 #include "glm/glm.hpp"
+#include <chrono>
 
 
 namespace hamlet {
@@ -33,9 +34,9 @@ namespace hamlet {
             std::fill_n(this->fbo.color_attachment(), this->fbo.num_pixels(), c32);
         }
 
-        void draw_triangle(glm::vec2 a, glm::vec2 b, glm::vec2 c) {
+        void draw_triangle(glm::vec2 a, glm::vec2 b, glm::vec2 c, glm::vec4 ac, glm::vec4 bc, glm::vec4 cc) {
             this->ndc2viewport(a); this->ndc2viewport(b); this->ndc2viewport(c);
-            float area = 1.0f / edge(c - a, b - a);
+            float inverse_area = 1.0f / edge(c - a, b - a);
 
             glm::ivec2 hi = round(max(a, max(b, c))),
                        lo = round(min(a, min(b, c)));
@@ -46,7 +47,12 @@ namespace hamlet {
                     glm::vec3 bary{edge(p - b, c - b), edge(p - c, a - c), edge(p - a, b - a)};
                     bool inside = glm::all(glm::greaterThanEqual(bary, glm::vec3(0)));
                     if (inside) {
-                        this->fbo.pixel(x, y) = glm::u8vec4(255);
+                        bary *= inverse_area;
+                        float red = glm::dot(bary, {ac.r, bc.r, cc.r});
+                        float green = glm::dot(bary, {ac.g, bc.g, cc.g});
+                        float blue = glm::dot(bary, {ac.b, bc.b, cc.b});
+                        float alpha = glm::dot(bary, {ac.a, bc.a, cc.a});
+                        this->fbo.pixel(x, y) = glm::u8vec4(glm::vec4(red, green, blue, alpha) * 255.f);
                     }
                 }
             }
@@ -55,9 +61,17 @@ namespace hamlet {
 }
 
 int main(void) {
-    fmt::print(fmt::fg(fmt::color::red) | fmt::emphasis::bold, "Hello World!\n");
-    hamlet::render_context rc(256, 256);
-    rc.draw_triangle({-0.5f, -0.5f}, {0.f, 0.5f}, {0.5f, -0.5f});
+    hamlet::render_context rc(4096, 4096);
+
+    glm::vec4 r = { 1, 0, 0, 1.0 };
+    glm::vec4 g = { 0, 1, 0, 1.0 };
+    glm::vec4 b = { 0, 0, 1, 1.0 };
+
+    auto start = std::chrono::high_resolution_clock::now();
+    rc.draw_triangle({ -0.5f, -0.5f}, { -0.25f, 0.25f}, { 0.5f, -0.5f}, r, g, b);
+    rc.draw_triangle({ -0.5f, 0.5f}, { 0.5f, 0.5f}, { -0.25f, -0.25f}, b, g, r);
+    auto end = std::chrono::high_resolution_clock::now();
+    fmt::print("Rendering took: {}s", std::chrono::duration<double>(end - start).count());
     rc.fbo.write_to_tga("test.tga");
 }
 

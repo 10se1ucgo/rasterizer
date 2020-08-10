@@ -6,6 +6,7 @@ out/
 build/
 
 # Visual Studio project files
+CMakeSettings.json
 .vs/
 
 # Prerequisites
