@@ -3,12 +3,32 @@
 #include "fmt/format.h"
 #include "fmt/color.h"
 #include "glm/glm.hpp"
+#include "glm/gtc/type_aligned.hpp"
 #include <chrono>
 
 
 namespace hamlet {
-    float edge(glm::vec2 p, glm::vec2 d) {
+#ifdef GLM_FORCE_ALIGNED_GENTYPES
+    using vec4 = glm::aligned_vec4;
+    using mat4 = glm::aligned_mat4x4;
+#else
+    using vec4 = glm::vec4;
+    using mat4 = glm::mat4x4;
+#endif
+
+    inline float edge(glm::vec2 p, glm::vec2 d) {
         return glm::determinant(glm::mat2(p, d));
+    }
+
+    inline bool all_components_positive(vec4 &v) {
+#if GLM_ARCH & GLM_ARCH_SSE42_BIT
+        // _mm_movemask_ps returns an integer bitmask of all of the sign bits of v
+        // e.g. 0b1001 = x,w negative, y,z positive.
+        // in this case, 0b0000 means all positive
+        return !_mm_movemask_ps(v.data);
+#else
+        return v.x >= 0 && v.y >= 0 && v.z >= 0 && v.w >= 0;
+#endif
     }
 
     struct render_context {
@@ -25,8 +45,10 @@ namespace hamlet {
             this->size = { width, height };
         }
 
-        void ndc2viewport(glm::vec2 &ndc) {
-            ndc = (ndc+1.0f) * (this->size*0.5f) + this->origin;
+        void ndc2viewport(vec4 &ndc) {
+            auto t((glm::vec2(ndc.x, ndc.y)+1.0f) * (this->size*0.5f) + this->origin);
+            ndc.x = t.x;
+            ndc.y = t.y;
         }
 
         void clear(glm::vec4 color = glm::vec4(0, 0, 0, 1)) {
@@ -34,26 +56,29 @@ namespace hamlet {
             std::fill_n(this->fbo.color_attachment(), this->fbo.num_pixels(), c32);
         }
 
-        void draw_triangle(glm::vec2 a, glm::vec2 b, glm::vec2 c, glm::vec4 ac, glm::vec4 bc, glm::vec4 cc) {
+        void draw_triangle(vec4 a, vec4 b, vec4 c, glm::vec4 ac, glm::vec4 bc, glm::vec4 cc) {
             this->ndc2viewport(a); this->ndc2viewport(b); this->ndc2viewport(c);
             float inverse_area = 1.0f / edge(c - a, b - a);
 
             glm::ivec2 hi = round(max(a, max(b, c))),
                        lo = round(min(a, min(b, c)));
 
-            glm::mat3x4 colors(ac, bc, cc);
+            mat4 colors(ac, bc, cc, vec4(0.0f, 0.0f, 0.0f, 0.0f));
 
+            vec4 p(lo.x + 0.5f, lo.y + 0.5f, 0.0f, 0.0f);
             for (int y = lo.y; y <= hi.y; ++y) {
+                p.x = lo.x;
                 for (int x = lo.x; x <= hi.x; ++x) {
-                    glm::vec2 p(x + 0.5f, y + 0.5f);
-                    glm::vec3 bary{edge(p - b, c - b), edge(p - c, a - c), edge(p - a, b - a)};
-                    bool inside = glm::all(glm::greaterThanEqual(bary, glm::vec3(0)));
+                    vec4 bary{edge(p - b, c - b), edge(p - c, a - c), edge(p - a, b - a), 1.0f};
+                    bool inside = all_components_positive(bary);
                     if (inside) {
                         bary *= inverse_area;
-                        glm::vec4 col(colors * bary);
-                        this->fbo.pixel(x, y) = glm::u8vec4(col * 255.f);
+                        vec4 col(colors * bary * 255.f);
+                        this->fbo.pixel(x, y) = glm::u8vec4(col);
                     }
+                    p.x++;
                 }
+                p.y++;
             }
         }
     };
@@ -67,8 +92,8 @@ int main(void) {
     glm::vec4 b = { 0, 0, 1, 1.0 };
 
     auto start = std::chrono::high_resolution_clock::now();
-    rc.draw_triangle({ -0.5f, -0.5f}, { -0.25f, 0.25f}, { 0.5f, -0.5f}, r, g, b);
-    rc.draw_triangle({ -0.5f, 0.5f}, { 0.5f, 0.5f}, { -0.25f, -0.25f}, b, g, r);
+    rc.draw_triangle({ -0.5f, -0.5f, 0, 1}, { -0.25f, 0.25f, 0, 1}, { 0.5f, -0.5f, 0, 1}, r, g, b);
+    rc.draw_triangle({ -0.5f, 0.5f, 0, 1}, { 0.5f, 0.5f, 0, 1}, { -0.25f, -0.25f, 0, 1}, b, g, r);
     auto end = std::chrono::high_resolution_clock::now();
     fmt::print("Rendering took: {}s", std::chrono::duration<double>(end - start).count());
     rc.fbo.write_to_tga("test.tga");
