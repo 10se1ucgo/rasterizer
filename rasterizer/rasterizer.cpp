@@ -41,6 +41,8 @@ namespace hamlet {
             glm::ivec2 hi = round(max(a, max(b, c))),
                        lo = round(min(a, min(b, c)));
 
+            glm::mat3x4 colors(ac, bc, cc);
+
             for (int y = lo.y; y <= hi.y; ++y) {
                 for (int x = lo.x; x <= hi.x; ++x) {
                     glm::vec2 p(x + 0.5f, y + 0.5f);
@@ -48,11 +50,8 @@ namespace hamlet {
                     bool inside = glm::all(glm::greaterThanEqual(bary, glm::vec3(0)));
                     if (inside) {
                         bary *= inverse_area;
-                        float red = glm::dot(bary, {ac.r, bc.r, cc.r});
-                        float green = glm::dot(bary, {ac.g, bc.g, cc.g});
-                        float blue = glm::dot(bary, {ac.b, bc.b, cc.b});
-                        float alpha = glm::dot(bary, {ac.a, bc.a, cc.a});
-                        this->fbo.pixel(x, y) = glm::u8vec4(glm::vec4(red, green, blue, alpha) * 255.f);
+                        glm::vec4 col(colors * bary);
+                        this->fbo.pixel(x, y) = glm::u8vec4(col * 255.f);
                     }
                 }
             }
