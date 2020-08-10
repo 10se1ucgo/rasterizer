@@ -27,19 +27,17 @@ namespace hamlet {
         tga_header header = { 0, 0, 2 , 0, 0, spec };
         
         // RGBA -> BGRA
-        const auto px = this->num_pixels();
-        color32 *buf = new color32[px];
-        memcpy(buf, this->color_attachment.get(), sizeof(color32) * px);
+        const size_t px = this->num_pixels();
+        const auto buf = std::make_unique<color32[]>(px); // todo: make_unique_for_overwrite
+        memcpy(buf.get(), this->color_attachment.get(), sizeof(color32) * px);
         for (size_t i = 0; i < px; ++i) {
             std::swap(buf[i].r, buf[i].b);
         }
 
         FILE *fp = fopen(file_name.c_str(), "wb");
         fwrite(&header, sizeof(header), 1, fp);
-        fwrite(buf, sizeof(color32), px, fp);
+        fwrite(buf.get(), sizeof(color32), px, fp);
         fclose(fp);
-
-        delete[] buf;
     }
 }
 
