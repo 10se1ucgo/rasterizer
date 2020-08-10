@@ -1,6 +1,6 @@
 ﻿cmake_minimum_required (VERSION 3.9)
 
-add_executable (rasterizer "framebuffer.cpp" "framebuffer.h")
+add_executable (rasterizer "framebuffer.cpp" "framebuffer.h" "rasterizer.cpp")
 set_property(TARGET rasterizer PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
 
 target_link_libraries(rasterizer fmt::fmt glm::glm)

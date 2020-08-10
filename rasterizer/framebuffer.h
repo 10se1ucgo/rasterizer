@@ -3,6 +3,7 @@
 #include "glm/glm.hpp"
 
 #include <memory>
+#include <string>
 
 
 namespace hamlet {
@@ -27,6 +28,8 @@ namespace hamlet {
         size_t num_pixels() const {
             return size_t(this->width) * this->height;
         }
+
+        void write_to_tga(const std::string &file_name) const;
 
         int w() { return this->width; }
         int h() { return this->height; }
