@@ -13,10 +13,14 @@ namespace hamlet {
 #ifdef GLM_FORCE_ALIGNED_GENTYPES
     using vec4 = glm::aligned_vec4;
     using mat4 = glm::aligned_mat4x4;
+    using ivec4 = glm::aligned_ivec4;
 #else
     using vec4 = glm::vec4;
     using mat4 = glm::mat4x4;
+    using ivec4 = glm::ivec4;
 #endif
+
+    const vec4 all_255s(255.f, 255.f, 255.f, 255.f);
 
     inline float edge(glm::vec2 p, glm::vec2 d) {
         return glm::determinant(glm::mat2(p, d));
@@ -30,6 +34,24 @@ namespace hamlet {
         return !_mm_movemask_ps(v.data);
 #else
         return v.x >= 0 && v.y >= 0 && v.z >= 0 && v.w >= 0;
+#endif
+    }
+
+    inline ivec4 interp_colors(const vec4 &bary, const vec4 &r, const vec4 &g, const vec4 &b, const vec4 &a) {
+#if GLM_ARCH & GLM_ARCH_SSE42_BIT
+        const auto br = _mm_dp_ps(bary.data, r.data, 0b11110001); // dot(bary, r), store result in .x
+        const auto bg = _mm_dp_ps(bary.data, g.data, 0b11110001); // dot(bary, g), store result in .x
+        const auto brg = _mm_insert_ps(br, bg, 0b00011100); // brg = (br.x, bg.x, 0, 0);
+        const auto bb = _mm_dp_ps(bary.data, b.data, 0b11110001); // ditto
+        const auto ba = _mm_dp_ps(bary.data, a.data, 0b11110001); // ditto
+        const auto bba = _mm_insert_ps(bb, ba, 0b00011100); // bba = (bb.x, ba.x, 0, 0);
+        const auto cb = _mm_movelh_ps(brg, bba); // cb = (brg.x, brg.y, bba.x bba.y);
+        const auto cb2 = _mm_mul_ps(cb, all_255s.data);
+        ivec4 result;
+        result.data = _mm_cvtps_epi32(cb2);
+        return result;
+#else
+        return ivec4(vec4(dot(bary, r), dot(bary, g), dot(bary, b), dot(bary, a)) * 255.f);
 #endif
     }
 
@@ -67,10 +89,15 @@ namespace hamlet {
             auto cad = (a - c);
             auto abd = (b - a);
 
+            vec4 reds   { ac.r, bc.r, cc.r, 0.0f },
+                 greens { ac.g, bc.g, cc.g, 0.0f },
+                 blues  { ac.b, bc.b, cc.b, 0.0f },
+                 alphas { ac.a, bc.a, cc.a, 0.0f };
+
             glm::ivec2 hi = round(max(a, max(b, c))),
                        lo = round(min(a, min(b, c)));
 
-            mat4 colors(ac, bc, cc, vec4(0.0f, 0.0f, 0.0f, 0.0f));
+            // mat4 colors(ac, bc, cc, vec4(0.0f, 0.0f, 0.0f, 0.0f));
 
             vec4 p(lo.x + 0.5f, lo.y + 0.5f, 0.0f, 0.0f);
             vec4 bary_o{ edge(p - b, bcd), edge(p - c, cad), edge(p - a, abd), 1.0f };
@@ -82,19 +109,18 @@ namespace hamlet {
             dy *= inverse_area;
 
             for (int y = lo.y; y <= hi.y; ++y) {
-#ifdef GLM_FORCE_ALIGNED_GENTYPES
-                vec4 bary;
-                bary.data = bary_o.data;
-#else
+// #ifdef GLM_FORCE_ALIGNED_GENTYPES
+//                 vec4 bary;
+//                 bary.data = bary_o.data;
+// #else
                 vec4 bary(bary_o);
-#endif
+// #endif
 
                 p.x = lo.x + 0.5f;
                 for (int x = lo.x; x <= hi.x; ++x) {
                     bool inside = all_components_positive(bary);
                     if (inside) {
-                        vec4 col(colors * bary * 255.f);
-                        this->fbo.pixel(x, y) = glm::u8vec4(col);
+                        this->fbo.pixel(x, y) = glm::u8vec4(interp_colors(bary, reds, greens, blues, alphas));
                     }
                     bary += dy;
                     p.x++;
