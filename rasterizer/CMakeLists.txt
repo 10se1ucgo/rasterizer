@@ -2,7 +2,7 @@
 
 add_executable(rasterizer "framebuffer.cpp" "framebuffer.h" "rasterizer.cpp")
 set_property(TARGET rasterizer PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
-# target_compile_definitions(rasterizer PUBLIC -DGLM_FORCE_ALIGNED_GENTYPES)
+target_compile_definitions(rasterizer PUBLIC -DGLM_FORCE_INTRINSICS -DGLM_FORCE_ALIGNED_GENTYPES)
 target_link_libraries(rasterizer fmt::fmt glm::glm)
 if(MSVC AND NOT (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC"))
     target_compile_options(rasterizer PUBLIC /arch:AVX)

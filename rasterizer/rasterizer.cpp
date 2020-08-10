@@ -37,7 +37,7 @@ namespace hamlet {
 #endif
     }
 
-    inline ivec4 interp_colors(const vec4 &bary, const vec4 &r, const vec4 &g, const vec4 &b, const vec4 &a) {
+    inline glm::u8vec4 interp_colors(const vec4 &bary, const vec4 &r, const vec4 &g, const vec4 &b, const vec4 &a) {
 #if GLM_ARCH & GLM_ARCH_SSE42_BIT
         const auto br = _mm_dp_ps(bary.data, r.data, 0b11110001); // dot(bary, r), store result in .x
         const auto bg = _mm_dp_ps(bary.data, g.data, 0b11110001); // dot(bary, g), store result in .x
@@ -46,12 +46,15 @@ namespace hamlet {
         const auto ba = _mm_dp_ps(bary.data, a.data, 0b11110001); // ditto
         const auto bba = _mm_insert_ps(bb, ba, 0b00011100); // bba = (bb.x, ba.x, 0, 0);
         const auto cb = _mm_movelh_ps(brg, bba); // cb = (brg.x, brg.y, bba.x bba.y);
-        const auto cb2 = _mm_mul_ps(cb, all_255s.data);
-        ivec4 result;
-        result.data = _mm_cvtps_epi32(cb2);
-        return result;
+        const auto cbf32 = _mm_mul_ps(cb, all_255s.data); // cb *= 255.f;
+        // vec4->u8vec4 conversion is definitely a large bottleneck, this is likely where the main SIMD speedup is from.
+        const auto cbi32 = _mm_cvtps_epi32(cbf32); // cb = i32vec4(cb)
+        const auto cbi16 = _mm_packus_epi32(cbi32, cbi32); // cb = i16vec4(cb)
+        const auto cbi8 = _mm_packus_epi16(cbi16, cbi16); // cb = i8vec4(cb);
+        uint32_t color = _mm_cvtsi128_si32(cbi8); // lower 32 bits of cb
+        return *reinterpret_cast<glm::u8vec4 *>(&color);
 #else
-        return ivec4(vec4(dot(bary, r), dot(bary, g), dot(bary, b), dot(bary, a)) * 255.f);
+        return glm::u8vec4(vec4(dot(bary, r), dot(bary, g), dot(bary, b), dot(bary, a)) * 255.f);
 #endif
     }
 
@@ -120,7 +123,7 @@ namespace hamlet {
                 for (int x = lo.x; x <= hi.x; ++x) {
                     bool inside = all_components_positive(bary);
                     if (inside) {
-                        this->fbo.pixel(x, y) = glm::u8vec4(interp_colors(bary, reds, greens, blues, alphas));
+                        this->fbo.pixel(x, y) = interp_colors(bary, reds, greens, blues, alphas);
                     }
                     bary += dy;
                     p.x++;
