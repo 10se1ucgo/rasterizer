@@ -3,7 +3,9 @@
 #include "fmt/format.h"
 #include "fmt/color.h"
 #include "glm/glm.hpp"
+#ifdef GLM_FORCE_ALIGNED_GENTYPES
 #include "glm/gtc/type_aligned.hpp"
+#endif
 #include <chrono>
 
 
@@ -60,24 +62,44 @@ namespace hamlet {
             this->ndc2viewport(a); this->ndc2viewport(b); this->ndc2viewport(c);
             float inverse_area = 1.0f / edge(c - a, b - a);
 
+
+            auto bcd = (c - b);
+            auto cad = (a - c);
+            auto abd = (b - a);
+
             glm::ivec2 hi = round(max(a, max(b, c))),
                        lo = round(min(a, min(b, c)));
 
             mat4 colors(ac, bc, cc, vec4(0.0f, 0.0f, 0.0f, 0.0f));
 
             vec4 p(lo.x + 0.5f, lo.y + 0.5f, 0.0f, 0.0f);
+            vec4 bary_o{ edge(p - b, bcd), edge(p - c, cad), edge(p - a, abd), 1.0f };
+            vec4 dy{ bcd.y, cad.y, abd.y, 0.0f };
+            vec4 dx{ bcd.x, cad.x, abd.x, 0.0f };
+
+            bary_o *= inverse_area;
+            dx *= inverse_area;
+            dy *= inverse_area;
+
             for (int y = lo.y; y <= hi.y; ++y) {
-                p.x = lo.x;
+#ifdef GLM_FORCE_ALIGNED_GENTYPES
+                vec4 bary;
+                bary.data = bary_o.data;
+#else
+                vec4 bary(bary_o);
+#endif
+
+                p.x = lo.x + 0.5f;
                 for (int x = lo.x; x <= hi.x; ++x) {
-                    vec4 bary{edge(p - b, c - b), edge(p - c, a - c), edge(p - a, b - a), 1.0f};
                     bool inside = all_components_positive(bary);
                     if (inside) {
-                        bary *= inverse_area;
                         vec4 col(colors * bary * 255.f);
                         this->fbo.pixel(x, y) = glm::u8vec4(col);
                     }
+                    bary += dy;
                     p.x++;
                 }
+                bary_o -= dx;
                 p.y++;
             }
         }
