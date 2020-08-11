@@ -1,3 +1,4 @@
+#define GLM_FORCE_SWIZZLE
 #include "framebuffer.h"
 
 #include "fmt/format.h"
@@ -7,7 +8,6 @@
 #include "glm/gtc/type_aligned.hpp"
 #endif
 #include <chrono>
-
 
 namespace hamlet {
 #ifdef GLM_FORCE_ALIGNED_GENTYPES
@@ -37,7 +37,7 @@ namespace hamlet {
 #endif
     }
 
-    inline glm::u8vec4 interp_colors(const avec4 &bary, const avec4 &r, const avec4 &g, const avec4 &b, const avec4 &a) {
+    inline avec4 interp_colors(const avec4 &bary, const avec4 &r, const avec4 &g, const avec4 &b, const avec4 &a) {
 #if GLM_ARCH & GLM_ARCH_SSE42_BIT
         const auto br = _mm_dp_ps(bary.data, r.data, 0b11110001); // dot(bary, r), store result in .x
         const auto bg = _mm_dp_ps(bary.data, g.data, 0b11110001); // dot(bary, g), store result in .x
@@ -46,20 +46,38 @@ namespace hamlet {
         const auto ba = _mm_dp_ps(bary.data, a.data, 0b11110001); // ditto
         const auto bba = _mm_insert_ps(bb, ba, 0b00011100); // bba = (bb.x, ba.x, 0, 0);
         const auto cb = _mm_movelh_ps(brg, bba); // cb = (brg.x, brg.y, bba.x bba.y);
-        const auto cbf255 = _mm_mul_ps(cb, all_255s.data); // cb *= 255.f;
+        avec4 c;
+        c.data = cb;
+        return c;
+        
+#else
+        return avec4(dot(bary, r), dot(bary, g), dot(bary, b), dot(bary, a)) * 255.f;
+#endif
+    }
 
+    inline glm::u8vec4 to_u8color(const avec4 &color) {
+#if GLM_ARCH & GLM_ARCH_SSE42_BIT
         // vec4->u8vec4 conversion
         // TODO: these pack instructions are used pretty inefficiently.
         // Buffer up multiple pixels at a time and then pack them together.
         // How? Not sure, maybe 2x2 tiles like how GPUs do it.
+        const auto cbf255 = _mm_mul_ps(color.data, all_255s.data); // cb *= 255.f;
         const auto cbi32 = _mm_cvtps_epi32(cbf255); // cb = i32vec4(cb)
         const auto cbi16 = _mm_packus_epi32(cbi32, cbi32); // cb = i16vec4(cb)
         const auto cbi8 = _mm_packus_epi16(cbi16, cbi16); // cb = i8vec4(cb);
-        uint32_t color = _mm_cvtsi128_si32(cbi8); // lower 32 bits of cb
-        return *reinterpret_cast<glm::u8vec4 *>(&color);
+        uint32_t c = _mm_cvtsi128_si32(cbi8); // lower 32 bits of cb
+        return *reinterpret_cast<glm::u8vec4 *>(&c);
 #else
-        return glm::u8vec4(avec4(dot(bary, r), dot(bary, g), dot(bary, b), dot(bary, a)) * 255.f);
+        return glm::u8vec4(color);
 #endif
+    }
+
+    void vert_shader(avec4 &position, glm::vec4 &color) {
+        
+    }
+
+    void frag_shader(avec4 &frag_coord, avec4 &frag_color) {
+        frag_color.rgb = .5f + .5f * glm::vec3(sin(frag_coord));
     }
 
     struct render_context {
@@ -104,6 +122,8 @@ namespace hamlet {
         }
 
         void draw_triangle(avec4 a, avec4 b, avec4 c, glm::vec4 ac, glm::vec4 bc, glm::vec4 cc) {
+            vert_shader(a, ac); vert_shader(b, bc); vert_shader(c, cc);
+            this->clip2ndc(a); this->clip2ndc(b); this->clip2ndc(c);
             this->ndc2viewport(a); this->ndc2viewport(b); this->ndc2viewport(c);
             float inverse_area = 1.0f / edge(c - a, b - a);
 
@@ -118,8 +138,11 @@ namespace hamlet {
                   zs     ( a.z,  b.z,  c.z, 0.0f),
                   ws     ( a.w,  b.w,  c.w, 0.0f);
 
-            glm::ivec2 hi = round(max(a, max(b, c))),
-                       lo = round(min(a, min(b, c)));
+            glm::vec2 fhi = round(max(a, max(b, c))),
+                      flo = round(min(a, min(b, c)));
+
+            glm::ivec2 hi = fhi,
+                       lo = flo;
 
             avec4 p(lo.x + 0.5f, lo.y + 0.5f, 0.0f, 0.0f);
             avec4 bary_o(edge(p - b, bcd), edge(p - c, cad), edge(p - a, abd), 1.0f);
@@ -132,7 +155,7 @@ namespace hamlet {
 
             for (int y = lo.y; y <= hi.y; ++y) {
                 avec4 bary(bary_o);
-                p.x = lo.x + 0.5f;
+                p.x = flo.x + 0.5f;
 
                 bool last_inside = false;
                 for (int x = lo.x; x <= hi.x; ++x) {
@@ -146,7 +169,9 @@ namespace hamlet {
                         p.w = glm::dot(bary, ws);
                         // bary * ws == {bary.x/a.w, bary.y/b.w, bary.z/c.w}
                         // TODO: replace separate dot product and multiplication w/ one mul + horizontal sum (less latency i believe)
-                        this->fbo.pixel(x, y) = interp_colors((bary * ws) / p.w, reds, greens, blues, alphas);
+                        auto frag_color = interp_colors((bary * ws) / p.w, reds, greens, blues, alphas);
+                        frag_shader(p, frag_color);
+                        this->fbo.pixel(x, y) = to_u8color(frag_color);
                     } else if (last_inside) {
                         // triangles are convex and each raster line is thus continuous
                         // if we were on the triangle and then fell off, it means this line is finished.
@@ -172,7 +197,7 @@ int main(void) {
     glm::vec4 b = { 0, 0, 1, 1.0 };
 
     auto start = std::chrono::high_resolution_clock::now();
-    rc.draw_triangle({ -0.5f, -0.5f, 0, 1}, { -0.25f, 0.25f, 0, 1}, { 0.5f, -0.5f, 0, 1}, r, g, b);
+    rc.draw_triangle({ -1, -1, 0, 1 }, { 0, 1, 0, 1 }, { 1, -1, 0, 1 }, r, g, b);
     rc.draw_triangle({ -0.5f, 0.5f, 0, 1}, { 0.5f, 0.5f, 0, 1}, { -0.25f, -0.25f, 0, 1}, b, g, r);
     auto end = std::chrono::high_resolution_clock::now();
     fmt::print("Rendering took: {}s", std::chrono::duration<double>(end - start).count());
