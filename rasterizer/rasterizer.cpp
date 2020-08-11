@@ -11,22 +11,22 @@
 
 namespace hamlet {
 #ifdef GLM_FORCE_ALIGNED_GENTYPES
-    using vec4 = glm::aligned_vec4;
-    using mat4 = glm::aligned_mat4x4;
-    using ivec4 = glm::aligned_ivec4;
+    using avec4 = glm::aligned_vec4;
+    using amat4 = glm::aligned_mat4x4;
+    using aivec4 = glm::aligned_ivec4;
 #else
-    using vec4 = glm::vec4;
-    using mat4 = glm::mat4x4;
-    using ivec4 = glm::ivec4;
+    using avec4 = glm::vec4;
+    using amat4 = glm::mat4x4;
+    using aivec4 = glm::ivec4;
 #endif
 
-    const vec4 all_255s(255.f, 255.f, 255.f, 255.f);
+    const avec4 all_255s(255.f, 255.f, 255.f, 255.f);
 
     inline float edge(glm::vec2 p, glm::vec2 d) {
         return glm::determinant(glm::mat2(p, d));
     }
 
-    inline bool all_components_positive(vec4 &v) {
+    inline bool all_components_positive(avec4 &v) {
 #if GLM_ARCH & GLM_ARCH_SSE42_BIT
         // _mm_movemask_ps returns an integer bitmask of all of the sign bits of v
         // e.g. 0b1001 = x,w negative, y,z positive.
@@ -37,7 +37,7 @@ namespace hamlet {
 #endif
     }
 
-    inline glm::u8vec4 interp_colors(const vec4 &bary, const vec4 &r, const vec4 &g, const vec4 &b, const vec4 &a) {
+    inline glm::u8vec4 interp_colors(const avec4 &bary, const avec4 &r, const avec4 &g, const avec4 &b, const avec4 &a) {
 #if GLM_ARCH & GLM_ARCH_SSE42_BIT
         const auto br = _mm_dp_ps(bary.data, r.data, 0b11110001); // dot(bary, r), store result in .x
         const auto bg = _mm_dp_ps(bary.data, g.data, 0b11110001); // dot(bary, g), store result in .x
@@ -46,36 +46,50 @@ namespace hamlet {
         const auto ba = _mm_dp_ps(bary.data, a.data, 0b11110001); // ditto
         const auto bba = _mm_insert_ps(bb, ba, 0b00011100); // bba = (bb.x, ba.x, 0, 0);
         const auto cb = _mm_movelh_ps(brg, bba); // cb = (brg.x, brg.y, bba.x bba.y);
-        const auto cbf32 = _mm_mul_ps(cb, all_255s.data); // cb *= 255.f;
-        // vec4->u8vec4 conversion is definitely a large bottleneck, this is likely where the main SIMD speedup is from.
-        const auto cbi32 = _mm_cvtps_epi32(cbf32); // cb = i32vec4(cb)
+        const auto cbf255 = _mm_mul_ps(cb, all_255s.data); // cb *= 255.f;
+
+        // vec4->u8vec4 conversion
+        // TODO: these pack instructions are used pretty inefficiently.
+        // Buffer up multiple pixels at a time and then pack them together.
+        // How? Not sure, maybe 2x2 tiles like how GPUs do it.
+        const auto cbi32 = _mm_cvtps_epi32(cbf255); // cb = i32vec4(cb)
         const auto cbi16 = _mm_packus_epi32(cbi32, cbi32); // cb = i16vec4(cb)
         const auto cbi8 = _mm_packus_epi16(cbi16, cbi16); // cb = i8vec4(cb);
         uint32_t color = _mm_cvtsi128_si32(cbi8); // lower 32 bits of cb
         return *reinterpret_cast<glm::u8vec4 *>(&color);
 #else
-        return glm::u8vec4(vec4(dot(bary, r), dot(bary, g), dot(bary, b), dot(bary, a)) * 255.f);
+        return glm::u8vec4(avec4(dot(bary, r), dot(bary, g), dot(bary, b), dot(bary, a)) * 255.f);
 #endif
     }
 
     struct render_context {
         hamlet::framebuffer fbo;
         glm::vec2 origin, size;
+        float near = 0.f, far = 1.f;
+        avec4 vp_center, vp_scale;
 
         render_context(int w, int h) : fbo(w, h) {
             this->viewport(0, 0, w, h);
             this->clear();
         }
 
-        void viewport(int x, int y, int width, int height) {
-            this->origin = { x, y };
-            this->size = { width, height };
+        void depth_range(const float near, const float far) {
+            this->near = near;
+            this->far = far;
         }
 
-        void ndc2viewport(vec4 &ndc) {
-            auto t((glm::vec2(ndc.x, ndc.y)+1.0f) * (this->size*0.5f) + this->origin);
-            ndc.x = t.x;
-            ndc.y = t.y;
+        void viewport(const int x, const int y, const int width, const int height) {
+            this->origin = { x, y };
+            this->size = { width, height };
+            // viewport transformations
+            this->vp_center = { float(width - x) / 2.f, float(height - y) / 2.f, (this->near + this->far) / 2.f, 0.f };
+            this->vp_scale = { this->size.x / 2.f, this->size.y / 2.f, (this->far - this->near) / 2.f, 1.0f };
+        }
+
+        void ndc2viewport(avec4 &ndc) {
+            // FMA??
+            ndc *= this->vp_scale;
+            ndc += this->vp_center;
         }
 
         void clear(glm::vec4 color = glm::vec4(0, 0, 0, 1)) {
@@ -83,51 +97,53 @@ namespace hamlet {
             std::fill_n(this->fbo.color_attachment(), this->fbo.num_pixels(), c32);
         }
 
-        void draw_triangle(vec4 a, vec4 b, vec4 c, glm::vec4 ac, glm::vec4 bc, glm::vec4 cc) {
+        void draw_triangle(avec4 a, avec4 b, avec4 c, glm::vec4 ac, glm::vec4 bc, glm::vec4 cc) {
             this->ndc2viewport(a); this->ndc2viewport(b); this->ndc2viewport(c);
             float inverse_area = 1.0f / edge(c - a, b - a);
-
 
             auto bcd = (c - b);
             auto cad = (a - c);
             auto abd = (b - a);
 
-            vec4 reds   { ac.r, bc.r, cc.r, 0.0f },
-                 greens { ac.g, bc.g, cc.g, 0.0f },
-                 blues  { ac.b, bc.b, cc.b, 0.0f },
-                 alphas { ac.a, bc.a, cc.a, 0.0f };
+            avec4 reds   (ac.r, bc.r, cc.r, 0.0f),
+                  greens (ac.g, bc.g, cc.g, 0.0f),
+                  blues  (ac.b, bc.b, cc.b, 0.0f),
+                  alphas (ac.a, bc.a, cc.a, 0.0f);
 
             glm::ivec2 hi = round(max(a, max(b, c))),
                        lo = round(min(a, min(b, c)));
 
             // mat4 colors(ac, bc, cc, vec4(0.0f, 0.0f, 0.0f, 0.0f));
 
-            vec4 p(lo.x + 0.5f, lo.y + 0.5f, 0.0f, 0.0f);
-            vec4 bary_o{ edge(p - b, bcd), edge(p - c, cad), edge(p - a, abd), 1.0f };
-            vec4 dy{ bcd.y, cad.y, abd.y, 0.0f };
-            vec4 dx{ bcd.x, cad.x, abd.x, 0.0f };
+            avec4 p(lo.x + 0.5f, lo.y + 0.5f, 0.0f, 0.0f);
+            avec4 bary_o(edge(p - b, bcd), edge(p - c, cad), edge(p - a, abd), 1.0f);
+            avec4 dy(bcd.y, cad.y, abd.y, 0.0f);
+            avec4 dx(bcd.x, cad.x, abd.x, 0.0f);
 
             bary_o *= inverse_area;
             dx *= inverse_area;
             dy *= inverse_area;
 
             for (int y = lo.y; y <= hi.y; ++y) {
-// #ifdef GLM_FORCE_ALIGNED_GENTYPES
-//                 vec4 bary;
-//                 bary.data = bary_o.data;
-// #else
-                vec4 bary(bary_o);
-// #endif
-
+                avec4 bary(bary_o);
                 p.x = lo.x + 0.5f;
+
+                bool last_inside = false;
                 for (int x = lo.x; x <= hi.x; ++x) {
                     bool inside = all_components_positive(bary);
+                    last_inside |= inside;
                     if (inside) {
                         this->fbo.pixel(x, y) = interp_colors(bary, reds, greens, blues, alphas);
+                    } else if (last_inside) {
+                        // triangles are convex and each raster line is thus continuous
+                        // if we were on the triangle and then fell off, it means this line is finished.
+                        break;
                     }
+
                     bary += dy;
                     p.x++;
                 }
+
                 bary_o -= dx;
                 p.y++;
             }
