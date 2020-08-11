@@ -26,7 +26,7 @@ namespace hamlet {
         return glm::determinant(glm::mat2(p, d));
     }
 
-    inline bool all_components_positive(avec4 &v) {
+    inline bool all_components_positive(const avec4 &v) {
 #if GLM_ARCH & GLM_ARCH_SSE42_BIT
         // _mm_movemask_ps returns an integer bitmask of all of the sign bits of v
         // e.g. 0b1001 = x,w negative, y,z positive.
@@ -82,8 +82,14 @@ namespace hamlet {
             this->origin = { x, y };
             this->size = { width, height };
             // viewport transformations
-            this->vp_center = { float(width - x) / 2.f, float(height - y) / 2.f, (this->near + this->far) / 2.f, 0.f };
+            this->vp_center = { x + (float(width) / 2.f), y + (float(height) / 2.f), (this->near + this->far) / 2.f, 0.f };
             this->vp_scale = { this->size.x / 2.f, this->size.y / 2.f, (this->far - this->near) / 2.f, 1.0f };
+        }
+
+        void clip2ndc(avec4 &clip) {
+            float w = 1.f/clip.w;
+            clip *= w;
+            clip.w = w;
         }
 
         void ndc2viewport(avec4 &ndc) {
@@ -108,12 +114,12 @@ namespace hamlet {
             avec4 reds   (ac.r, bc.r, cc.r, 0.0f),
                   greens (ac.g, bc.g, cc.g, 0.0f),
                   blues  (ac.b, bc.b, cc.b, 0.0f),
-                  alphas (ac.a, bc.a, cc.a, 0.0f);
+                  alphas (ac.a, bc.a, cc.a, 0.0f),
+                  zs     ( a.z,  b.z,  c.z, 0.0f),
+                  ws     ( a.w,  b.w,  c.w, 0.0f);
 
             glm::ivec2 hi = round(max(a, max(b, c))),
                        lo = round(min(a, min(b, c)));
-
-            // mat4 colors(ac, bc, cc, vec4(0.0f, 0.0f, 0.0f, 0.0f));
 
             avec4 p(lo.x + 0.5f, lo.y + 0.5f, 0.0f, 0.0f);
             avec4 bary_o(edge(p - b, bcd), edge(p - c, cad), edge(p - a, abd), 1.0f);
@@ -133,7 +139,14 @@ namespace hamlet {
                     bool inside = all_components_positive(bary);
                     last_inside |= inside;
                     if (inside) {
-                        this->fbo.pixel(x, y) = interp_colors(bary, reds, greens, blues, alphas);
+                        // depth values are interpolated with no perspective (See: OpenGL spec 14.10)
+                        p.z = glm::dot(bary, zs);
+                        // Vertex attributes (e.g.: color, textures) are interpolated with perspective (See: OpenGL spec 14.09)
+                        // p.w = bary.x/a.w + bary.y/b.w + bary.z/c.w (ws is inverse w, see `clip2ndc`)
+                        p.w = glm::dot(bary, ws);
+                        // bary * ws == {bary.x/a.w, bary.y/b.w, bary.z/c.w}
+                        // TODO: replace separate dot product and multiplication w/ one mul + horizontal sum (less latency i believe)
+                        this->fbo.pixel(x, y) = interp_colors((bary * ws) / p.w, reds, greens, blues, alphas);
                     } else if (last_inside) {
                         // triangles are convex and each raster line is thus continuous
                         // if we were on the triangle and then fell off, it means this line is finished.
