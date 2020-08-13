@@ -37,7 +37,7 @@ namespace hamlet {
 #endif
     }
 
-    inline avec4 interp_colors(const avec4 &bary, const avec4 &r, const avec4 &g, const avec4 &b, const avec4 &a) {
+    inline avec4 interpolate_attribute(const avec4 &bary, const avec4 &r, const avec4 &g, const avec4 &b, const avec4 &a) {
 #if GLM_ARCH & GLM_ARCH_SSE42_BIT
         const auto br = _mm_dp_ps(bary.data, r.data, 0b11110001); // dot(bary, r), store result in .x
         const auto bg = _mm_dp_ps(bary.data, g.data, 0b11110001); // dot(bary, g), store result in .x
@@ -49,13 +49,12 @@ namespace hamlet {
         avec4 c;
         c.data = cb;
         return c;
-        
 #else
         return avec4(dot(bary, r), dot(bary, g), dot(bary, b), dot(bary, a)) * 255.f;
 #endif
     }
 
-    inline glm::u8vec4 to_u8color(const avec4 &color) {
+    inline color32 vec4_to_color32(const avec4 &color) {
 #if GLM_ARCH & GLM_ARCH_SSE42_BIT
         // vec4->u8vec4 conversion
         // TODO: these pack instructions are used pretty inefficiently.
@@ -66,10 +65,16 @@ namespace hamlet {
         const auto cbi16 = _mm_packus_epi32(cbi32, cbi32); // cb = i16vec4(cb)
         const auto cbi8 = _mm_packus_epi16(cbi16, cbi16); // cb = i8vec4(cb);
         uint32_t c = _mm_cvtsi128_si32(cbi8); // lower 32 bits of cb
-        return *reinterpret_cast<glm::u8vec4 *>(&c);
+        return *reinterpret_cast<color32 *>(&c);
 #else
         return glm::u8vec4(color);
 #endif
+    }
+
+    inline depth_t float_to_depth(float z) {
+        // Since we know z is in [0, 1], we can avoid the bitwise AND the bitfield generates.
+        uint32_t d = uint32_t(z * ((1 << depth_t::DEPTH_BITS) - 1));
+        return *reinterpret_cast<depth_t *>(&d);
     }
 
     void vert_shader(avec4 &position, glm::vec4 &color) {
@@ -77,7 +82,7 @@ namespace hamlet {
     }
 
     void frag_shader(avec4 &frag_coord, avec4 &frag_color) {
-        frag_color.rgb = .5f + .5f * glm::vec3(sin(frag_coord));
+        // frag_color.rgb = .5f + .5f * glm::vec3(sin(frag_coord));
     }
 
     struct render_context {
@@ -118,7 +123,10 @@ namespace hamlet {
 
         void clear(glm::vec4 color = glm::vec4(0, 0, 0, 1)) {
             glm::u8vec4 c32(color * 255.f);
+            depth_t d;
+            d.depth = (1 << depth_t::DEPTH_BITS) - 1;
             std::fill_n(this->fbo.color_attachment(), this->fbo.num_pixels(), c32);
+            std::fill_n(this->fbo.depth_attachment(), this->fbo.num_pixels(), d);
         }
 
         void draw_triangle(avec4 a, avec4 b, avec4 c, glm::vec4 ac, glm::vec4 bc, glm::vec4 cc) {
@@ -131,6 +139,9 @@ namespace hamlet {
             auto cad = (a - c);
             auto abd = (b - a);
 
+            // having each component in its own packed float makes it much easier (faster?) to perform
+            // fragment input attribute interpolation w/ SSE instructions.
+            // The value for each component at a specific fragment is dot(perspective_correct_barycentric, component_vector);
             avec4 reds   (ac.r, bc.r, cc.r, 0.0f),
                   greens (ac.g, bc.g, cc.g, 0.0f),
                   blues  (ac.b, bc.b, cc.b, 0.0f),
@@ -162,16 +173,27 @@ namespace hamlet {
                     bool inside = all_components_positive(bary);
                     last_inside |= inside;
                     if (inside) {
-                        // depth values are interpolated with no perspective (See: OpenGL spec 14.10)
+                        // depth and w values are interpolated with no perspective (See: OpenGL 4.6 spec 14.10)
                         p.z = glm::dot(bary, zs);
-                        // Vertex attributes (e.g.: color, textures) are interpolated with perspective (See: OpenGL spec 14.09)
-                        // p.w = bary.x/a.w + bary.y/b.w + bary.z/c.w (ws is inverse w, see `clip2ndc`)
                         p.w = glm::dot(bary, ws);
-                        // bary * ws == {bary.x/a.w, bary.y/b.w, bary.z/c.w}
-                        // TODO: replace separate dot product and multiplication w/ one mul + horizontal sum (less latency i believe)
-                        auto frag_color = interp_colors((bary * ws) / p.w, reds, greens, blues, alphas);
-                        frag_shader(p, frag_color);
-                        this->fbo.pixel(x, y) = to_u8color(frag_color);
+
+                        // scuffed depth test
+                        // TODO: stencil testing? maybe i should just use a float depth buffer and forget about stencils
+                        // much easier computationally than to do float->int conversion all the time.
+                        depth_t incoming(float_to_depth(p.z));
+                        depth_t &stored(this->fbo.depth(x, y));
+
+                        if (incoming.depth < stored.depth) {
+                            // depth test passed
+                            stored = incoming;
+                            // Vertex attributes (e.g.: color, textures) are interpolated with perspective (See: OpenGL 4.6 spec 14.09)
+                            // p.w == bary.x/a.w + bary.y/b.w + bary.z/c.w (ws is inverse w, see `clip2ndc`
+                            // bary * ws == {bary.x/a.w, bary.y/b.w, bary.z/c.w}
+                            // TODO: replace separate dot product and multiplication w/ one mul + horizontal sum (less latency i believe)
+                            auto frag_color = interpolate_attribute((bary * ws) / p.w, reds, greens, blues, alphas);
+                            frag_shader(p, frag_color);
+                            this->fbo.pixel(x, y) = vec4_to_color32(frag_color);
+                        }
                     } else if (last_inside) {
                         // triangles are convex and each raster line is thus continuous
                         // if we were on the triangle and then fell off, it means this line is finished.
@@ -197,7 +219,7 @@ int main(void) {
     glm::vec4 b = { 0, 0, 1, 1.0 };
 
     auto start = std::chrono::high_resolution_clock::now();
-    rc.draw_triangle({ -1, -1, 0, 1 }, { 0, 1, 0, 1 }, { 1, -1, 0, 1 }, r, g, b);
+    rc.draw_triangle({ -1, -1, -0.5, 1 }, { 0, 1, -0.5, 1 }, { 1, -1, -0.5, 1 }, r, g, b);
     rc.draw_triangle({ -0.5f, 0.5f, 0, 1}, { 0.5f, 0.5f, 0, 1}, { -0.25f, -0.25f, 0, 1}, b, g, r);
     auto end = std::chrono::high_resolution_clock::now();
     fmt::print("Rendering took: {}s", std::chrono::duration<double>(end - start).count());
