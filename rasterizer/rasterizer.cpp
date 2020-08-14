@@ -77,12 +77,17 @@ namespace hamlet {
         return *reinterpret_cast<depth_t *>(&d);
     }
 
-    void vert_shader(avec4 &position, glm::vec4 &color) {
-        
+    void vert_shader(avec4 &position, glm::vec4 &color);
+    avec4 frag_shader(const avec4 &frag_coord, const avec4 &frag_color);
+
+    template<int N, std::size_t... Idx>
+    void evaluate_vert_shader(avec4 &position, glm::vec4(&attrs)[N], std::index_sequence<Idx...>) {
+        return vert_shader(position, attrs[Idx]...);
     }
 
-    void frag_shader(avec4 &frag_coord, avec4 &frag_color) {
-        // frag_color.rgb = .5f + .5f * glm::vec3(sin(frag_coord));
+    template<int N, std::size_t... Idx>
+    avec4 evaluate_frag_shader(const avec4 &frag_coord, const avec4(&attrs)[N], std::index_sequence<Idx...>) {
+        return frag_shader(frag_coord, attrs[Idx]...);
     }
 
     struct render_context {
@@ -129,8 +134,25 @@ namespace hamlet {
             std::fill_n(this->fbo.depth_attachment(), this->fbo.num_pixels(), d);
         }
 
-        void draw_triangle(avec4 a, avec4 b, avec4 c, glm::vec4 ac, glm::vec4 bc, glm::vec4 cc) {
-            vert_shader(a, ac); vert_shader(b, bc); vert_shader(c, cc);
+        // All vertex attributes are type vec4.
+        // Vertex shader outputs are the same as their inputs, 
+        // All vertices require a position attribute. The first input to the vertex shader will be the vertex position.
+        // Each attribute is passed as a reference, which should then be transformed by the function.
+        template<int NAttrs>
+        void draw_triangle(avec4 a, avec4 b, avec4 c, const glm::vec4(&a_attrs)[NAttrs], const glm::vec4(&b_attrs)[NAttrs], const glm::vec4(&c_attrs)[NAttrs]) {
+            // this is....horrendously bad.
+            // TODO: This isn't a good solution. Investigate better ones!
+            // (Maybe using a matrix, passing a reference to each column, then transposing after?)
+            glm::vec4 a_attr[NAttrs];
+            glm::vec4 b_attr[NAttrs];
+            glm::vec4 c_attr[NAttrs];
+            memcpy(a_attr, a_attrs, sizeof(a_attr));
+            memcpy(b_attr, b_attrs, sizeof(b_attr));
+            memcpy(c_attr, c_attrs, sizeof(c_attr));
+            evaluate_vert_shader(a, a_attr, std::make_index_sequence<NAttrs>{});
+            evaluate_vert_shader(b, b_attr, std::make_index_sequence<NAttrs>{});
+            evaluate_vert_shader(c, c_attr, std::make_index_sequence<NAttrs>{});
+
             this->clip2ndc(a); this->clip2ndc(b); this->clip2ndc(c);
             this->ndc2viewport(a); this->ndc2viewport(b); this->ndc2viewport(c);
             float inverse_area = 1.0f / edge(c - a, b - a);
@@ -142,12 +164,19 @@ namespace hamlet {
             // having each component in its own packed float makes it much easier (faster?) to perform
             // fragment input attribute interpolation w/ SSE instructions.
             // The value for each component at a specific fragment is dot(perspective_correct_barycentric, component_vector);
-            avec4 reds   (ac.r, bc.r, cc.r, 0.0f),
-                  greens (ac.g, bc.g, cc.g, 0.0f),
-                  blues  (ac.b, bc.b, cc.b, 0.0f),
-                  alphas (ac.a, bc.a, cc.a, 0.0f),
-                  zs     ( a.z,  b.z,  c.z, 0.0f),
-                  ws     ( a.w,  b.w,  c.w, 0.0f);
+            avec4 attr_xs[NAttrs],
+                  attr_ys[NAttrs],
+                  attr_zs[NAttrs],
+                  attr_ws[NAttrs];
+            for(int i = 0; i < NAttrs; ++i) {
+                attr_xs[i] = avec4(a_attr[i].x, b_attr[i].x, c_attr[i].x, 0.0f);
+                attr_ys[i] = avec4(a_attr[i].y, b_attr[i].y, c_attr[i].y, 0.0f);
+                attr_zs[i] = avec4(a_attr[i].z, b_attr[i].z, c_attr[i].z, 0.0f);
+                attr_ws[i] = avec4(a_attr[i].w, b_attr[i].w, c_attr[i].w, 0.0f);
+            }
+            
+            avec4 zs(a.z, b.z, c.z, 0.0f),
+                  ws(a.w, b.w, c.w, 0.0f);
 
             glm::vec2 fhi = round(max(a, max(b, c))),
                       flo = round(min(a, min(b, c)));
@@ -190,8 +219,13 @@ namespace hamlet {
                             // p.w == bary.x/a.w + bary.y/b.w + bary.z/c.w (ws is inverse w, see `clip2ndc`
                             // bary * ws == {bary.x/a.w, bary.y/b.w, bary.z/c.w}
                             // TODO: replace separate dot product and multiplication w/ one mul + horizontal sum (less latency i believe)
-                            auto frag_color = interpolate_attribute((bary * ws) / p.w, reds, greens, blues, alphas);
-                            frag_shader(p, frag_color);
+                            auto psc_bary(bary * ws / p.w);
+                            avec4 frag_attrs[NAttrs];
+                            for (int i = 0; i < NAttrs; ++i) {
+                                frag_attrs[i] = interpolate_attribute(psc_bary, attr_xs[i], attr_ys[i], attr_zs[i], attr_ws[i]);
+                            }
+
+                            auto frag_color = evaluate_frag_shader(p, frag_attrs, std::make_index_sequence<NAttrs>{});
                             this->fbo.pixel(x, y) = vec4_to_color32(frag_color);
                         }
                     } else if (last_inside) {
@@ -209,14 +243,22 @@ namespace hamlet {
             }
         }
     };
+
+    void vert_shader(avec4 &position, glm::vec4 &color) {
+        
+    }
+
+    avec4 frag_shader(const avec4 &frag_coord, const avec4 &frag_color) {
+        return avec4(.5f + .5f * glm::vec3(sin(frag_coord)), 1.0f);
+    }
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     hamlet::render_context rc(4096, 4096);
 
-    glm::vec4 r = { 1, 0, 0, 1.0 };
-    glm::vec4 g = { 0, 1, 0, 1.0 };
-    glm::vec4 b = { 0, 0, 1, 1.0 };
+    glm::vec4 r[] = {{ 1, 0, 0, 1.0 }};
+    glm::vec4 g[] = {{ 0, 1, 0, 1.0 }};
+    glm::vec4 b[] = {{ 0, 0, 1, 1.0 }};
 
     auto start = std::chrono::high_resolution_clock::now();
     rc.draw_triangle({ -1, -1, -0.5, 1 }, { 0, 1, -0.5, 1 }, { 1, -1, -0.5, 1 }, r, g, b);
